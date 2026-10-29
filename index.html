@@ -92,7 +92,7 @@ select,input[type=range]{width:100%}
       <label for="surfaceDetect">赤丸マーカー</label>
       <select id="surfaceDetect">
         <option value="off" selected>OFF</option>
-        <option value="on">ON（映像の変化候補）</option>
+        <option value="on">ON（静止構造エッジ検出）</option>
       </select>
     </div>
     <div>
@@ -119,8 +119,8 @@ select,input[type=range]{width:100%}
   </div>
 
   <p class="note">
-    赤丸は映像内の明暗変化を簡易解析した候補位置です。
-    壁・遮蔽物そのものを識別するAIではなく、誤検出があります。
+    動体差分（人の動き）を除外した静止輪郭（壁・角・遮蔽物）のエッジを強調検出します。
+    動体や一変した空間誤認識を抑制するためSobel勾配フィルタとフレーム間差分判定を適用しています。
     カメラ映像はページ内で処理し、外部へ送信しません。
     カメラ利用にはHTTPSと許可が必要です。
   </p>
@@ -155,6 +155,8 @@ const detectorCtx=detectorCanvas.getContext('2d',{
   willReadFrequently:true
 });
 
+let prevLumFrame=null;
+
 function fmt(seconds){
   seconds=Math.max(0,Math.floor(seconds));
   return String(Math.floor(seconds/60)).padStart(2,'0')+':'+
@@ -185,7 +187,7 @@ async function startCamera(){
   }
 }
 
-/* 映像の明暗差を調べ、変化の大きい位置に赤丸を表示 */
+/* 映像のSobelエッジ検出 ＋ 動体差分判定（人物や空間誤判定の除外） */
 function startVisualMarkers(){
   clearInterval(detectTimer);
 
@@ -196,6 +198,7 @@ function startVisualMarkers(){
         !stream || video.readyState<2){
       layer.style.display='none';
       layer.innerHTML='';
+      prevLumFrame=null;
       return;
     }
 
@@ -206,23 +209,45 @@ function startVisualMarkers(){
       detectorCtx.drawImage(video,0,0,w,h);
 
       const frame=detectorCtx.getImageData(0,0,w,h).data;
+      const currentLum=new Float32Array(w*h);
 
-      function luminance(x,y){
-        const i=(y*w+x)*4;
-        return .299*frame[i]+.587*frame[i+1]+.114*frame[i+2];
+      for(let i=0;i<w*h;i++){
+        const idx=i*4;
+        currentLum[i]=0.299*frame[idx]+0.587*frame[idx+1]+0.114*frame[idx+2];
       }
+
+      const isMotion=new Uint8Array(w*h);
+      if(prevLumFrame && prevLumFrame.length===w*h){
+        for(let i=0;i<w*h;i++){
+          if(Math.abs(currentLum[i]-prevLumFrame[i])>18){
+            isMotion[i]=1;
+          }
+        }
+      }
+      prevLumFrame=currentLum;
 
       const candidates=[];
 
-      for(let y=12;y<h-12;y+=12){
-        for(let x=12;x<w-12;x+=12){
-          const center=luminance(x,y);
-          const right=luminance(x+8,y);
-          const down=luminance(x,y+8);
-          const contrast=Math.abs(center-right)+Math.abs(center-down);
+      for(let y=2;y<h-2;y+=4){
+        for(let x=2;x<w-2;x+=4){
+          let motionSum=0;
+          for(let my=-1;my<=1;my++){
+            for(let mx=-1;mx<=1;mx++){
+              motionSum+=isMotion[(y+my)*w+(x+mx)];
+            }
+          }
+          if(motionSum>2) continue;
 
-          if(contrast>95){
-            candidates.push({x,y,score:contrast});
+          const p0=currentLum[(y-1)*w+(x-1)], p1=currentLum[(y-1)*w+x], p2=currentLum[(y-1)*w+(x+1)];
+          const p3=currentLum[y*w+(x-1)],                         p5=currentLum[y*w+(x+1)];
+          const p6=currentLum[(y+1)*w+(x-1)], p7=currentLum[(y+1)*w+x], p8=currentLum[(y+1)*w+(x+1)];
+
+          const gx=(-1*p0 + 1*p2 + -2*p3 + 2*p5 + -1*p6 + 1*p8);
+          const gy=(-1*p0 - 2*p1 - 1*p2 + 1*p6 + 2*p7 + 1*p8);
+          const edgeStrength=Math.hypot(gx,gy);
+
+          if(edgeStrength>180){
+            candidates.push({x,y,score:edgeStrength});
           }
         }
       }
@@ -231,7 +256,7 @@ function startVisualMarkers(){
       const chosen=[];
 
       for(const c of candidates){
-        if(chosen.every(q=>Math.hypot(q.x-c.x,q.y-c.y)>28)){
+        if(chosen.every(q=>Math.hypot(q.x-c.x,q.y-c.y)>22)){
           chosen.push(c);
         }
         if(chosen.length>=5)break;
@@ -251,7 +276,7 @@ function startVisualMarkers(){
     }catch(error){
       layer.style.display='none';
     }
-  },700);
+  },350);
 }
 
 function beep(){
