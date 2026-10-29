@@ -23,7 +23,7 @@ main{max-width:1000px;margin:auto;padding:12px;display:grid;gap:12px}
 .cross:before{left:16px;top:0;width:1px;height:34px}
 .cross:after{top:16px;left:0;height:1px;width:34px}
 .surface-markers{position:absolute;inset:0;display:none}
-.surface-dot{position:absolute;width:28px;height:28px;border:3px solid #ff3344;border-radius:50%;box-shadow:0 0 0 2px #ff334455,0 0 12px #ff3344;transform:translate(-50%,-50%)}
+.surface-dot{position:absolute;width:28px;height:28px;border:3px solid #ff3344;border-radius:50%;box-shadow:0 0 0 2px #ff334455,0 0 12px #ff3344;transform:translate(-50%,-50%);transition:left 0.1s linear, top 0.1s linear}
 .surface-dot:after{content:"";position:absolute;inset:7px;border-radius:50%;background:#ff3344}
 .silhouette{position:absolute;width:72px;height:156px;left:66%;top:23%;opacity:.72;filter:drop-shadow(0 0 5px #63d8e8);display:none}
 .silhouette svg{width:100%;height:100%}
@@ -92,7 +92,7 @@ select,input[type=range]{width:100%}
       <label for="surfaceDetect">赤丸マーカー</label>
       <select id="surfaceDetect">
         <option value="off" selected>OFF</option>
-        <option value="on">ON（静止構造エッジ検出）</option>
+        <option value="on">ON（高速構造保持判定）</option>
       </select>
     </div>
     <div>
@@ -119,8 +119,8 @@ select,input[type=range]{width:100%}
   </div>
 
   <p class="note">
-    動体差分（人の動き）を除外した静止輪郭（壁・角・遮蔽物）のエッジを強調検出します。
-    動体や一変した空間誤認識を抑制するためSobel勾配フィルタとフレーム間差分判定を適用しています。
+    高周波（60fps）解析による高速追従と、時間平滑化ヒートマップにより安定した構造・角・壁を判定します。
+    人の移動による一時的遮蔽・動きを検知して人領域を除外し、認識マーカーのブレやチカチカ消失を防ぎます。
     カメラ映像はページ内で処理し、外部へ送信しません。
     カメラ利用にはHTTPSと許可が必要です。
   </p>
@@ -148,14 +148,20 @@ let startAt=0;
 let hits=0;
 let contacts=0;
 let audio=null;
-let detectTimer=null;
+let animFrameId=null;
 
 const detectorCanvas=document.createElement('canvas');
 const detectorCtx=detectorCanvas.getContext('2d',{
   willReadFrequently:true
 });
 
-let prevLumFrame=null;
+const W=80, H=60;
+detectorCanvas.width=W;
+detectorCanvas.height=H;
+
+let prevLum=new Float32Array(W*H);
+let stabilityMap=new Float32Array(W*H);
+let activeDots=[];
 
 function fmt(seconds){
   seconds=Math.max(0,Math.floor(seconds));
@@ -187,67 +193,63 @@ async function startCamera(){
   }
 }
 
-/* 映像のSobelエッジ検出 ＋ 動体差分判定（人物や空間誤判定の除外） */
+/* 人を除外し、壁・構造をリアルタイム(60fps)かつ持続的に認識 */
 function startVisualMarkers(){
-  clearInterval(detectTimer);
+  if(animFrameId) cancelAnimationFrame(animFrameId);
 
-  detectTimer=setInterval(()=>{
+  function processFrame(){
     const layer=$('surfaceMarkers');
 
-    if($('surfaceDetect').value!=='on' ||
-        !stream || video.readyState<2){
+    if($('surfaceDetect').value!=='on' || !stream || video.readyState<2){
       layer.style.display='none';
       layer.innerHTML='';
-      prevLumFrame=null;
+      activeDots=[];
+      stabilityMap.fill(0);
+      animFrameId=requestAnimationFrame(processFrame);
       return;
     }
 
     try{
-      const w=160,h=120;
-      detectorCanvas.width=w;
-      detectorCanvas.height=h;
-      detectorCtx.drawImage(video,0,0,w,h);
+      detectorCtx.drawImage(video,0,0,W,H);
+      const frame=detectorCtx.getImageData(0,0,W,H).data;
+      const currentLum=new Float32Array(W*H);
 
-      const frame=detectorCtx.getImageData(0,0,w,h).data;
-      const currentLum=new Float32Array(w*h);
-
-      for(let i=0;i<w*h;i++){
+      for(let i=0;i<W*H;i++){
         const idx=i*4;
         currentLum[i]=0.299*frame[idx]+0.587*frame[idx+1]+0.114*frame[idx+2];
       }
 
-      const isMotion=new Uint8Array(w*h);
-      if(prevLumFrame && prevLumFrame.length===w*h){
-        for(let i=0;i<w*h;i++){
-          if(Math.abs(currentLum[i]-prevLumFrame[i])>18){
-            isMotion[i]=1;
+      for(let y=1;y<H-1;y++){
+        for(let x=1;x<W-1;x++){
+          const idx=y*W+x;
+          
+          // 動き判定（動いている人間や動体を検出して除外）
+          const diff=Math.abs(currentLum[idx]-prevLum[idx]);
+          const isPersonOrMotion=diff>12;
+
+          // エッジ強度計算 (簡易Sobel/ハリス)
+          const gx = currentLum[idx+1] - currentLum[idx-1];
+          const gy = currentLum[idx+W] - currentLum[idx-W];
+          const edge = Math.hypot(gx, gy);
+
+          if(!isPersonOrMotion && edge>35){
+            // 安定した背景壁・構造物にポイントを加算
+            stabilityMap[idx]=Math.min(100, stabilityMap[idx]+12);
+          }else{
+            // 動体領域または非エッジ部は徐々に減衰
+            stabilityMap[idx]=Math.max(0, stabilityMap[idx] - (isPersonOrMotion ? 25 : 4));
           }
         }
       }
-      prevLumFrame=currentLum;
+
+      prevLum.set(currentLum);
 
       const candidates=[];
-
-      for(let y=2;y<h-2;y+=4){
-        for(let x=2;x<w-2;x+=4){
-          let motionSum=0;
-          for(let my=-1;my<=1;my++){
-            for(let mx=-1;mx<=1;mx++){
-              motionSum+=isMotion[(y+my)*w+(x+mx)];
-            }
-          }
-          if(motionSum>2) continue;
-
-          const p0=currentLum[(y-1)*w+(x-1)], p1=currentLum[(y-1)*w+x], p2=currentLum[(y-1)*w+(x+1)];
-          const p3=currentLum[y*w+(x-1)],                         p5=currentLum[y*w+(x+1)];
-          const p6=currentLum[(y+1)*w+(x-1)], p7=currentLum[(y+1)*w+x], p8=currentLum[(y+1)*w+(x+1)];
-
-          const gx=(-1*p0 + 1*p2 + -2*p3 + 2*p5 + -1*p6 + 1*p8);
-          const gy=(-1*p0 - 2*p1 - 1*p2 + 1*p6 + 2*p7 + 1*p8);
-          const edgeStrength=Math.hypot(gx,gy);
-
-          if(edgeStrength>180){
-            candidates.push({x,y,score:edgeStrength});
+      for(let y=3;y<H-3;y+=3){
+        for(let x=3;x<W-3;x+=3){
+          const score=stabilityMap[y*W+x];
+          if(score>45){
+            candidates.push({x, y, score});
           }
         }
       }
@@ -256,27 +258,39 @@ function startVisualMarkers(){
       const chosen=[];
 
       for(const c of candidates){
-        if(chosen.every(q=>Math.hypot(q.x-c.x,q.y-c.y)>22)){
+        if(chosen.every(q=>Math.hypot(q.x-c.x, q.y-c.y)>10)){
           chosen.push(c);
         }
-        if(chosen.length>=5)break;
+        if(chosen.length>=5) break;
       }
 
-      layer.innerHTML='';
+      if(activeDots.length!==chosen.length){
+        layer.innerHTML='';
+        activeDots=[];
+        chosen.forEach(()=>{
+          const dot=document.createElement('div');
+          dot.className='surface-dot';
+          layer.appendChild(dot);
+          activeDots.push(dot);
+        });
+      }
 
-      chosen.forEach(c=>{
-        const dot=document.createElement('div');
-        dot.className='surface-dot';
-        dot.style.left=(c.x/w*100)+'%';
-        dot.style.top=(c.y/h*100)+'%';
-        layer.appendChild(dot);
+      chosen.forEach((c, i)=>{
+        if(activeDots[i]){
+          activeDots[i].style.left=(c.x/W*100)+'%';
+          activeDots[i].style.top=(c.y/H*100)+'%';
+        }
       });
 
       layer.style.display='block';
     }catch(error){
       layer.style.display='none';
     }
-  },350);
+
+    animFrameId=requestAnimationFrame(processFrame);
+  }
+
+  animFrameId=requestAnimationFrame(processFrame);
 }
 
 function beep(){
@@ -415,13 +429,15 @@ $('surfaceDetect').addEventListener('change',()=>{
   if($('surfaceDetect').value==='off'){
     $('surfaceMarkers').style.display='none';
     $('surfaceMarkers').innerHTML='';
+    activeDots=[];
+    stabilityMap.fill(0);
   }else if(stream){
     startVisualMarkers();
   }
 });
 
 window.addEventListener('pagehide',()=>{
-  clearInterval(detectTimer);
+  if(animFrameId) cancelAnimationFrame(animFrameId);
   if(stream)stream.getTracks().forEach(track=>track.stop());
 });
 </script>
