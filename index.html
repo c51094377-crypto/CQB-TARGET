@@ -23,7 +23,7 @@ main{max-width:1000px;margin:auto;padding:12px;display:grid;gap:12px}
 .cross:before{left:16px;top:0;width:1px;height:34px}
 .cross:after{top:16px;left:0;height:1px;width:34px}
 .surface-markers{position:absolute;inset:0;display:none}
-.surface-dot{position:absolute;width:28px;height:28px;border:3px solid #ff3344;border-radius:50%;box-shadow:0 0 0 2px #ff334455,0 0 12px #ff3344;transform:translate(-50%,-50%);transition:left 0.1s linear, top 0.1s linear}
+.surface-dot{position:absolute;width:28px;height:28px;border:3px solid #ff3344;border-radius:50%;box-shadow:0 0 0 2px #ff334455,0 0 12px #ff3344;transform:translate(-50%,-50%);transition:left 0.25s ease-out, top 0.25s ease-out}
 .surface-dot:after{content:"";position:absolute;inset:7px;border-radius:50%;background:#ff3344}
 .silhouette{position:absolute;width:72px;height:156px;left:66%;top:23%;opacity:.72;filter:drop-shadow(0 0 5px #63d8e8);display:none}
 .silhouette svg{width:100%;height:100%}
@@ -92,7 +92,7 @@ select,input[type=range]{width:100%}
       <label for="surfaceDetect">赤丸マーカー</label>
       <select id="surfaceDetect">
         <option value="off" selected>OFF</option>
-        <option value="on">ON（高速構造保持判定）</option>
+        <option value="on">ON（高精度壁・角判定）</option>
       </select>
     </div>
     <div>
@@ -119,8 +119,8 @@ select,input[type=range]{width:100%}
   </div>
 
   <p class="note">
-    高周波（60fps）解析による高速追従と、時間平滑化ヒートマップにより安定した構造・角・壁を判定します。
-    人の移動による一時的遮蔽・動きを検知して人領域を除外し、認識マーカーのブレやチカチカ消失を防ぎます。
+    人の肌色・服・背中の有機的輪郭および平坦空間（壁の中央や何もない場所）を除外し、安定した縦横構造・コーナー（壁の出っ張り・角・遮蔽物の境界）のみを蓄積判定します。
+    マーカーは十分な蓄積（約1.2秒）を経てから固定表示され、ブレや即時誤検知を防止します。
     カメラ映像はページ内で処理し、外部へ送信しません。
     カメラ利用にはHTTPSと許可が必要です。
   </p>
@@ -148,19 +148,18 @@ let startAt=0;
 let hits=0;
 let contacts=0;
 let audio=null;
-let animFrameId=null;
+let detectTimer=null;
 
 const detectorCanvas=document.createElement('canvas');
 const detectorCtx=detectorCanvas.getContext('2d',{
   willReadFrequently:true
 });
 
-const W=80, H=60;
+const W=120, H=90;
 detectorCanvas.width=W;
 detectorCanvas.height=H;
 
-let prevLum=new Float32Array(W*H);
-let stabilityMap=new Float32Array(W*H);
+let accumulator=new Float32Array(W*H);
 let activeDots=[];
 
 function fmt(seconds){
@@ -193,62 +192,89 @@ async function startCamera(){
   }
 }
 
-/* 人を除外し、壁・構造をリアルタイム(60fps)かつ持続的に認識 */
+/* 判定速度を適正化(約150ms間隔)し、人物(肌色・服)や平坦空間を除外、持続的な壁角のみを安定認識 */
 function startVisualMarkers(){
-  if(animFrameId) cancelAnimationFrame(animFrameId);
+  clearInterval(detectTimer);
 
-  function processFrame(){
+  detectTimer=setInterval(()=>{
     const layer=$('surfaceMarkers');
 
     if($('surfaceDetect').value!=='on' || !stream || video.readyState<2){
       layer.style.display='none';
       layer.innerHTML='';
+      accumulator.fill(0);
       activeDots=[];
-      stabilityMap.fill(0);
-      animFrameId=requestAnimationFrame(processFrame);
       return;
     }
 
     try{
       detectorCtx.drawImage(video,0,0,W,H);
-      const frame=detectorCtx.getImageData(0,0,W,H).data;
-      const currentLum=new Float32Array(W*H);
+      const imgData=detectorCtx.getImageData(0,0,W,H);
+      const frame=imgData.data;
+
+      const lum=new Float32Array(W*H);
+      const isPerson=new Uint8Array(W*H);
 
       for(let i=0;i<W*H;i++){
         const idx=i*4;
-        currentLum[i]=0.299*frame[idx]+0.587*frame[idx+1]+0.114*frame[idx+2];
+        const r=frame[idx], g=frame[idx+1], b=frame[idx+2];
+        lum[i]=0.299*r+0.587*g+0.114*b;
+
+        // 人物検知（肌色領域および彩度特徴による背中・服・人物領域の除外）
+        const max=Math.max(r,g,b), min=Math.min(r,g,b);
+        const sat=(max===0)?0:(max-min)/max;
+        const isSkin = (r > 60 && g > 35 && b > 20 && (r - g) > 10 && (r - b) > 15);
+        const isOrganicCloth = (sat > 0.18 && lum[i] > 30 && lum[i] < 225);
+
+        if(isSkin || isOrganicCloth){
+          isPerson[i]=1;
+        }
       }
 
-      for(let y=1;y<H-1;y++){
-        for(let x=1;x<W-1;x++){
+      for(let y=2;y<H-2;y++){
+        for(let x=2;x<W-2;x++){
           const idx=y*W+x;
-          
-          // 動き判定（動いている人間や動体を検出して除外）
-          const diff=Math.abs(currentLum[idx]-prevLum[idx]);
-          const isPersonOrMotion=diff>12;
 
-          // エッジ強度計算 (簡易Sobel/ハリス)
-          const gx = currentLum[idx+1] - currentLum[idx-1];
-          const gy = currentLum[idx+W] - currentLum[idx-W];
-          const edge = Math.hypot(gx, gy);
+          // 人物および周辺領域は判定から除外
+          let personSurrounding=0;
+          for(let dy=-1;dy<=1;dy++){
+            for(let dx=-1;dx<=1;dx++){
+              if(isPerson[(y+dy)*W+(x+dx)]) personSurrounding++;
+            }
+          }
 
-          if(!isPersonOrMotion && edge>35){
-            // 安定した背景壁・構造物にポイントを加算
-            stabilityMap[idx]=Math.min(100, stabilityMap[idx]+12);
+          if(personSurrounding>1){
+            accumulator[idx]=Math.max(0, accumulator[idx]-15);
+            continue;
+          }
+
+          // 縦横の明確な輝度エッジ（直線的な壁・角・境界）
+          const dxL = Math.abs(lum[idx] - lum[idx-2]);
+          const dxR = Math.abs(lum[idx] - lum[idx+2]);
+          const dyU = Math.abs(lum[idx] - lum[idx-2*W]);
+          const dyD = Math.abs(lum[idx] - lum[idx+2*W]);
+
+          // 角（コーナー）または明確な垂直/水平壁エッジの判定
+          const isHorizontalEdge = (dyU > 32 && dyD > 32);
+          const isVerticalEdge = (dxL > 32 && dxR > 32);
+          const isCorner = ((dxL > 25 || dxR > 25) && (dyU > 25 || dyD > 25));
+
+          if(isCorner || isHorizontalEdge || isVerticalEdge){
+            // 壁の角や境界領域に安定的にスコアを蓄積
+            accumulator[idx]=Math.min(100, accumulator[idx]+12);
           }else{
-            // 動体領域または非エッジ部は徐々に減衰
-            stabilityMap[idx]=Math.max(0, stabilityMap[idx] - (isPersonOrMotion ? 25 : 4));
+            // 何もない平坦空間・壁の中央などはスコア減衰
+            accumulator[idx]=Math.max(0, accumulator[idx]-6);
           }
         }
       }
 
-      prevLum.set(currentLum);
-
       const candidates=[];
-      for(let y=3;y<H-3;y+=3){
-        for(let x=3;x<W-3;x+=3){
-          const score=stabilityMap[y*W+x];
-          if(score>45){
+      for(let y=5;y<H-5;y+=4){
+        for(let x=5;x<W-5;x+=4){
+          const score=accumulator[y*W+x];
+          // 約1.2秒以上（スコア70以上）継続して確認された壁・角のみを採用
+          if(score>=70){
             candidates.push({x, y, score});
           }
         }
@@ -258,7 +284,7 @@ function startVisualMarkers(){
       const chosen=[];
 
       for(const c of candidates){
-        if(chosen.every(q=>Math.hypot(q.x-c.x, q.y-c.y)>10)){
+        if(chosen.every(q=>Math.hypot(q.x-c.x, q.y-c.y)>16)){
           chosen.push(c);
         }
         if(chosen.length>=5) break;
@@ -286,11 +312,7 @@ function startVisualMarkers(){
     }catch(error){
       layer.style.display='none';
     }
-
-    animFrameId=requestAnimationFrame(processFrame);
-  }
-
-  animFrameId=requestAnimationFrame(processFrame);
+  },150);
 }
 
 function beep(){
@@ -429,15 +451,15 @@ $('surfaceDetect').addEventListener('change',()=>{
   if($('surfaceDetect').value==='off'){
     $('surfaceMarkers').style.display='none';
     $('surfaceMarkers').innerHTML='';
+    accumulator.fill(0);
     activeDots=[];
-    stabilityMap.fill(0);
   }else if(stream){
     startVisualMarkers();
   }
 });
 
 window.addEventListener('pagehide',()=>{
-  if(animFrameId) cancelAnimationFrame(animFrameId);
+  clearInterval(detectTimer);
   if(stream)stream.getTracks().forEach(track=>track.stop());
 });
 </script>
