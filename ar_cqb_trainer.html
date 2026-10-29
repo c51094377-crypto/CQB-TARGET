@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AR CQB Trainer — Prototype</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1118;--panel:#121d28;--line:#2d4050;--cyan:#66d9e8;--red:#ff4e58;--text:#eaf2f7;--muted:#9fb0bd}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif}
+header{padding:14px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:#0e1720}
+.brand{font-weight:800;letter-spacing:.08em}.brand small{display:block;color:var(--muted);font-size:11px;letter-spacing:.12em;margin-top:2px}
+.pill{font-size:11px;color:var(--cyan);border:1px solid #315d68;border-radius:99px;padding:5px 9px}
+main{max-width:1000px;margin:auto;padding:14px;display:grid;gap:12px}
+.stage{position:relative;width:100%;aspect-ratio:4/3;max-height:68vh;min-height:260px;background:#101923;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+#camera{position:absolute;width:100%;height:100%;object-fit:cover;inset:0;display:none}
+#fallback{position:absolute;inset:0;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 60%,#253744,#101923 65%);color:var(--muted);text-align:center;padding:20px}
+#fallback .camicon{font-size:42px;margin-bottom:8px}
+#overlay{position:absolute;inset:0;pointer-events:none}
+.cross{position:absolute;left:50%;top:50%;width:34px;height:34px;transform:translate(-50%,-50%);opacity:.7}
+.cross:before,.cross:after{content:"";position:absolute;background:#d6f5fa;box-shadow:0 0 6px #66d9e8}
+.cross:before{left:16px;top:0;width:1px;height:34px}.cross:after{top:16px;left:0;height:1px;width:34px}
+.silhouette{position:absolute;width:72px;height:156px;left:66%;top:23%;opacity:.72;filter:drop-shadow(0 0 5px #63d8e8);display:none}
+.silhouette svg{width:100%;height:100%;overflow:visible}
+.silhouette path,.silhouette circle{fill:rgba(45,181,205,.18);stroke:#75e8f3;stroke-width:2}
+#tag{position:absolute;display:none;left:calc(66% + 32px);top:20%;font-size:10px;letter-spacing:.12em;color:#8bf1fb;background:#07131acc;border:1px solid #3f9eac;padding:4px 6px;border-radius:4px}
+#hitFlash{position:absolute;inset:0;background:#ff182b;opacity:0;pointer-events:none}
+.hit #hitFlash{animation:flash .55s ease-out 1}
+@keyframes flash{0%{opacity:.5}100%{opacity:0}}
+#hitBanner{display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 24px;border:2px solid #ff6971;background:#29090dcc;color:#fff;font-size:clamp(25px,6vw,44px);font-weight:900;letter-spacing:.15em;text-shadow:0 0 16px #ff3e49;box-shadow:0 0 30px #ff283755}
+.hit #hitBanner{display:block}
+.hud{position:absolute;left:10px;right:10px;top:10px;display:flex;justify-content:space-between;gap:8px;font-size:10px;letter-spacing:.1em;text-shadow:0 1px 5px #000}
+.hud span{padding:5px 7px;border:1px solid #ffffff35;background:#08111bbd;border-radius:4px}
+.bottomHud{position:absolute;left:10px;right:10px;bottom:10px;display:flex;justify-content:space-between;font-size:10px;color:#dce9ef;text-shadow:0 1px 4px #000}
+.panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button{appearance:none;border:1px solid #3b5365;background:#1a2b39;color:var(--text);padding:11px 14px;border-radius:9px;font:inherit;font-weight:650;cursor:pointer}
+button.primary{background:#176273;border-color:#26889a}button.danger{background:#3b1a22;border-color:#77313a}button:disabled{opacity:.4;cursor:not-allowed}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}
+label{font-size:12px;color:var(--muted);display:block;margin-bottom:7px}
+select,input[type=range]{width:100%}select{background:#0b141d;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px}
+.stat{font-size:12px;color:var(--muted);line-height:1.7}.stat strong{color:var(--text)}
+#status{color:var(--cyan);font-size:13px;margin-top:10px;min-height:20px}
+.note{font-size:11px;line-height:1.65;color:var(--muted);margin:10px 2px 2px}
+@media(max-width:600px){main{padding:9px}.stage{aspect-ratio:3/4;max-height:58vh}.grid{grid-template-columns:1fr 1fr}.grid>div:last-child{grid-column:1/-1}.panel{padding:11px}button{padding:10px 11px}.silhouette{width:58px;height:126px}}
+</style>
+</head>
+<body>
+<header><div class="brand">AR CQB TRAINER <small>CAMERA OVERLAY / PROTOTYPE 0.1</small></div><div class="pill">LOCAL • BROWSER ONLY</div></header>
+<main>
+<section class="stage" id="stage" aria-label="カメラ練習画面">
+ <video id="camera" autoplay playsinline muted></video>
+ <div id="fallback"><div><div class="camicon">⌖</div><strong>CAMERA VIEW</strong><br><span>カメラを起動すると映像がここに表示されます</span></div></div>
+ <div id="overlay">
+  <div class="hud"><span>TRAINING MODE</span><span id="clock">00:00</span></div>
+  <div class="cross"></div>
+  <div class="silhouette" id="silhouette" aria-label="仮想シルエット">
+   <svg viewBox="0 0 80 170" aria-hidden="true">
+    <circle cx="40" cy="18" r="12"/>
+    <path d="M29 34 Q40 29 51 34 L58 76 L51 83 L49 61 L54 105 L48 108 L45 78 L44 119 L49 160 L39 160 L34 122 L28 160 L18 160 L25 108 L22 78 L18 104 L12 101 L20 57 L17 79 L11 76 L18 39 Q22 34 29 34Z"/>
+   </svg>
+  </div>
+  <div id="tag">SIMULATED CONTACT</div>
+  <div id="hitFlash"></div><div id="hitBanner">HIT!</div>
+  <div class="bottomHud"><span id="modeLabel">SIMULATION READY</span><span>OVERLAY: ON</span></div>
+ </div>
+</section>
+<section class="panel">
+ <div class="row">
+  <button class="primary" id="cameraBtn">📷 カメラ起動</button>
+  <button class="primary" id="startBtn">▶ 練習開始</button>
+  <button id="stopBtn" disabled>■ 停止</button>
+  <button id="resetBtn">↻ リセット</button>
+ </div>
+ <div id="status" role="status">待機中 — カメラを起動するか、背景なしでシミュレーションできます。</div>
+ <div class="grid">
+  <div><label for="interval">イベント間隔</label><select id="interval"><option value="8">短め（約8〜15秒）</option><option value="15" selected>標準（約15〜30秒）</option><option value="25">長め（約25〜45秒）</option></select></div>
+  <div><label for="duration">警告音の長さ</label><select id="duration"><option value="0.25">短い</option><option value="0.6" selected>標準</option><option value="1.1">長い</option></select></div>
+  <div><label for="volume">警告音の音量</label><input id="volume" type="range" min="0" max="100" value="55"><div class="stat"><span id="volLabel">55%</span></div></div>
+ </div>
+ <p class="note">※ 影と被弾イベントは練習用の演出です。実際の人や物体、壁の向こう側を検知する機能はありません。カメラ映像はこのページ内で表示し、外部サーバーへ送信しません。カメラはHTTPS環境で許可してください。</p>
+</section>
+<section class="panel">
+ <div class="row"><strong>セッション</strong><span class="pill" id="statePill">READY</span></div>
+ <div class="row" style="margin-top:12px;gap:24px">
+  <div class="stat">経過時間<br><strong id="elapsed">00:00</strong></div>
+  <div class="stat">HIT演出回数<br><strong id="hits">0</strong></div>
+  <div class="stat">仮想影の表示<br><strong id="contacts">0</strong></div>
+ </div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const video=$('camera'),stage=$('stage'),sil=$('silhouette'),tag=$('tag');
+let stream=null,running=false,timer=null,clockTimer=null,startAt=0,hits=0,contacts=0,context=null;
+function fmt(s){s=Math.max(0,Math.floor(s));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}
+function status(t){$('status').textContent=t}
+function setState(s){$('statePill').textContent=s;$('modeLabel').textContent=s==='RUNNING'?'SIMULATION ACTIVE':s==='HIT'?'HIT EVENT':'SIMULATION READY'}
+async function cameraOn(){
+ try{
+  if(!navigator.mediaDevices?.getUserMedia)throw new Error('このブラウザではカメラAPIを利用できません。HTTPSのSafariで開いてください。');
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+  video.srcObject=stream;video.style.display='block';$('fallback').style.display='none';
+  await video.play();$('cameraBtn').textContent='✓ カメラ起動中';status('カメラ起動中。映像はこのページ内に表示されています。');
+ }catch(e){status('カメラを起動できませんでした：'+(e.message||e.name)+'（HTTPSとカメラ許可を確認）');}
+}
+function beep(){
+ try{
+  context=context||new (window.AudioContext||window.webkitAudioContext)();
+  if(context.state==='suspended')context.resume();
+  const dur=Number($('duration').value),vol=Number($('volume').value)/100;
+  const osc=context.createOscillator(),gain=context.createGain();
+  osc.type='square';osc.frequency.setValueAtTime(880,context.currentTime);
+  osc.frequency.setValueAtTime(660,context.currentTime+dur*.45);
+  gain.gain.setValueAtTime(Math.max(.0001,vol*.22),context.currentTime);
+  gain.gain.exponentialRampToValueAtTime(.0001,context.currentTime+dur);
+  osc.connect(gain);gain.connect(context.destination);osc.start();osc.stop(context.currentTime+dur);
+ }catch(e){status('音声を再生できません。開始ボタンをもう一度押してください。')}
+}
+function moveContact(){
+ const x=10+Math.random()*75,y=14+Math.random()*40,scale=.75+Math.random()*.7;
+ sil.style.left=x+'%';sil.style.top=y+'%';sil.style.transform=`scale(${scale})`;
+ tag.style.left=`min(calc(${x}% + 35px), 75%)`;tag.style.top=Math.max(5,y-3)+'%';
+ sil.style.display='block';tag.style.display='block';contacts++;$('contacts').textContent=contacts;
+ // simulated event: a visual training cue, not a real-world threat or hit detector
+ const delay=1500+Math.random()*2500;
+ setTimeout(()=>{if(!running)return;stage.classList.remove('hit');void stage.offsetWidth;stage.classList.add('hit');$('hitBanner').style.display='block';hits++;$('hits').textContent=hits;setState('HIT');status('シミュレーションイベント：HIT！');beep();
+  setTimeout(()=>{stage.classList.remove('hit');$('hitBanner').style.display='';sil.style.display='none';tag.style.display='none';if(running){setState('RUNNING');status('練習中 — 次の仮想イベントを待機中。')}},850);
+ },delay);
+}
+function schedule(){if(!running)return;const base=Number($('interval').value);timer=setTimeout(()=>{if(!running)return;moveContact();schedule()},(base+Math.random()*base)*1000)}
+function start(){
+ if(running)return;running=true;startAt=Date.now();$('startBtn').disabled=true;$('stopBtn').disabled=false;$('cameraBtn').disabled=!!stream;
+ setState('RUNNING');status('練習開始 — 仮想イベントが自動発生します。');if(context?.state==='suspended')context.resume();
+ schedule();clockTimer=setInterval(()=>{$('elapsed').textContent=fmt((Date.now()-startAt)/1000);$('clock').textContent=$('elapsed').textContent},250);
+}
+function stop(){running=false;clearTimeout(timer);clearInterval(clockTimer);$('startBtn').disabled=false;$('stopBtn').disabled=true;$('cameraBtn').disabled=false;sil.style.display='none';tag.style.display='none';stage.classList.remove('hit');$('hitBanner').style.display='';setState('READY');status('停止しました。')}
+function reset(){stop();hits=0;contacts=0;$('hits').textContent='0';$('contacts').textContent='0';$('elapsed').textContent='00:00';$('clock').textContent='00:00';status('リセットしました。カメラを起動するか、練習開始を押してください。')}
+$('cameraBtn').addEventListener('click',cameraOn);$('startBtn').addEventListener('click',start);$('stopBtn').addEventListener('click',stop);$('resetBtn').addEventListener('click',reset);
+$('volume').addEventListener('input',()=>{$('volLabel').textContent=$('volume').value+'%'});
+window.addEventListener('pagehide',()=>{if(stream)stream.getTracks().forEach(t=>t.stop());});
+</script>
+</body>
+</html>
